@@ -1,0 +1,295 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>AI Cheat Detection Prototype</title>
+    <!-- Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link
+      href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap"
+      rel="stylesheet"
+    />
+    <style>
+      body {
+        font-family: "Inter", sans-serif;
+      }
+      .video-wrapper {
+        position: relative;
+        width: 100%;
+        height: 100%;
+      }
+      video {
+        border-radius: 12px;
+        box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1),
+          0 2px 4px -1px rgba(0, 0, 0, 0.06);
+        /* Flip horizontally when using the front camera to act as a mirror */
+      }
+      canvas {
+        position: absolute;
+        top: 0;
+        left: 0;
+        /* Flip horizontally to match the video when using the front camera */
+      }
+      .flipped {
+        transform: scaleX(-1);
+      }
+    </style>
+  </head>
+  <body
+    class="bg-gray-900 text-gray-100 p-4 sm:p-8 flex flex-col items-center justify-start min-h-screen overflow-hidden"
+  >
+    <div
+      class="w-full flex-grow flex flex-col items-center justify-center space-y-4 max-w-2xl mx-auto"
+    >
+      <h1
+        class="text-3xl sm:text-4xl font-extrabold text-white tracking-tight text-center mt-8"
+      >
+        AI Fitness Assessment
+      </h1>
+
+      <div
+        class="video-wrapper w-full flex-grow relative rounded-xl bg-black mt-4"
+      >
+        <video
+          id="webcam"
+          class="absolute inset-0 w-full h-full rounded-xl object-cover flipped"
+        ></video>
+        <canvas
+          id="canvas"
+          class="absolute inset-0 w-full h-full flipped"
+        ></canvas>
+
+        <!-- Overlay for loading state -->
+        <div
+          id="loading"
+          class="absolute inset-0 bg-black bg-opacity-70 text-white flex items-center justify-center flex-col space-y-4 rounded-xl z-20"
+        >
+          <div
+            class="animate-spin rounded-full h-12 w-12 border-4 border-white border-t-transparent"
+          ></div>
+          <p class="text-lg font-medium">Loading AI model...</p>
+        </div>
+
+        <!-- Overlay for count and status -->
+        <div
+          id="info-overlay"
+          class="absolute inset-x-0 bottom-0 p-6 rounded-b-xl backdrop-blur-sm bg-black/50 text-white z-10"
+        >
+          <div class="grid grid-cols-1 sm:grid-cols-2 gap-6">
+            <div class="p-4 rounded-lg border-2 border-indigo-700">
+              <h2 class="text-xl font-bold text-indigo-300">Sit-Up Count</h2>
+              <div
+                id="counter"
+                class="text-5xl font-black text-indigo-100 mt-1"
+              >
+                0
+              </div>
+            </div>
+            <div
+              class="p-4 rounded-lg border-2 border-red-700 flex flex-col justify-center"
+            >
+              <h2 class="text-xl font-bold text-red-300">Status</h2>
+              <p id="message" class="text-red-400 mt-1 font-medium">
+                Waiting for sit-ups...
+              </p>
+            </div>
+          </div>
+        </div>
+
+        <button
+          id="camera-toggle-btn"
+          class="absolute top-4 right-4 z-30 px-4 py-2 bg-blue-600 text-white font-semibold rounded-lg shadow-md hover:bg-blue-700 transition duration-300 text-sm"
+        >
+          Switch Camera
+        </button>
+      </div>
+    </div>
+
+    <!-- TensorFlow.js and PoseNet libraries -->
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/posenet"></script>
+
+    <script>
+      const video = document.getElementById("webcam");
+      const canvas = document.getElementById("canvas");
+      const ctx = canvas.getContext("2d");
+      const counterElement = document.getElementById("counter");
+      const messageElement = document.getElementById("message");
+      const loadingElement = document.getElementById("loading");
+      const cameraToggleBtn = document.getElementById("camera-toggle-btn");
+
+      let net;
+      let sitUpCount = 0;
+      let isDown = false; // Tracks if the person is in the "down" position
+      let lastTimestamp = 0;
+      let currentCamera = "user"; // 'user' for front, 'environment' for back
+
+      // Configuration for the sit-up detection
+      const MIN_CONFIDENCE = 0.5; // Minimum confidence for keypoints to be used
+      const MIN_MOVEMENT_RANGE = 20; // Minimum vertical pixel movement for a valid sit-up
+      const HIP_TO_SHOULDER_RATIO = 1.2; // A simple ratio to check body orientation
+
+      // Function to draw keypoints on the canvas
+      function drawKeypoints(keypoints) {
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+        for (let i = 0; i < keypoints.length; i++) {
+          const keypoint = keypoints[i];
+          if (keypoint.score < MIN_CONFIDENCE) continue;
+
+          // Draw a circle for each keypoint
+          ctx.beginPath();
+          ctx.arc(keypoint.position.x, keypoint.position.y, 5, 0, 2 * Math.PI);
+          ctx.fillStyle = "#6366f1";
+          ctx.fill();
+        }
+      }
+
+      // Main game loop
+      async function detectPose() {
+        if (!net || video.readyState !== 4) {
+          requestAnimationFrame(detectPose);
+          return;
+        }
+
+        const pose = await net.estimateSinglePose(video, {
+          flipHorizontal: currentCamera === "user", // Only flip if using the front camera
+        });
+
+        // Draw the keypoints on the canvas
+        drawKeypoints(pose.keypoints);
+
+        // Get relevant keypoints
+        const leftHip = pose.keypoints.find((p) => p.part === "leftHip");
+        const rightHip = pose.keypoints.find((p) => p.part === "rightHip");
+        const leftShoulder = pose.keypoints.find(
+          (p) => p.part === "leftShoulder"
+        );
+        const rightShoulder = pose.keypoints.find(
+          (p) => p.part === "rightShoulder"
+        );
+
+        // Simple cheat detection and form analysis
+        if (!leftHip || !rightHip || !leftShoulder || !rightShoulder) {
+          messageElement.textContent =
+            "Please ensure your full body is visible.";
+          messageElement.classList.replace("text-green-400", "text-red-400");
+        } else {
+          // Calculate average hip and shoulder y-positions
+          const avgHipY = (leftHip.position.y + rightHip.position.y) / 2;
+          const avgShoulderY =
+            (leftShoulder.position.y + rightShoulder.position.y) / 2;
+
+          // Simple check for body orientation (Are the shoulders above the hips?)
+          const isBodyUpright = avgShoulderY < avgHipY;
+          const isVerticalMovementSufficient =
+            Math.abs(avgShoulderY - lastTimestamp) > MIN_MOVEMENT_RANGE;
+          lastTimestamp = avgShoulderY;
+
+          // Simple state machine to count sit-ups
+          if (isBodyUpright && !isDown) {
+            // This is the "up" position. Check if we just came from "down"
+            if (sitUpCount > 0) {
+              // To avoid initial false counts
+              messageElement.textContent = "Great form! Keep going!";
+              messageElement.classList.replace(
+                "text-red-400",
+                "text-green-400"
+              );
+            }
+            isDown = true;
+          } else if (!isBodyUpright && isDown && isVerticalMovementSufficient) {
+            // This is the "down" position. A sit-up is complete.
+            sitUpCount++;
+            counterElement.textContent = sitUpCount;
+            isDown = false;
+            messageElement.textContent = "Sit-up counted!";
+            messageElement.classList.replace("text-red-400", "text-green-400");
+          } else if (
+            !isBodyUpright &&
+            isDown &&
+            !isVerticalMovementSufficient
+          ) {
+            // Potential cheat detection: Not enough movement to count as a full rep
+            messageElement.textContent =
+              "Invalid movement. Complete the full range of motion!";
+            messageElement.classList.replace("text-green-400", "text-red-400");
+          }
+        }
+
+        requestAnimationFrame(detectPose);
+      }
+
+      // Function to start or restart the webcam stream
+      async function startWebcam() {
+        try {
+          // Access the webcam with the current facing mode
+          const stream = await navigator.mediaDevices.getUserMedia({
+            video: {
+              width: { ideal: 640 },
+              height: { ideal: 480 },
+              facingMode: currentCamera,
+            },
+          });
+          video.srcObject = stream;
+          await new Promise((resolve) => {
+            video.onloadedmetadata = () => {
+              resolve(video);
+            };
+          });
+
+          // Update canvas and video classes for mirroring
+          if (currentCamera === "user") {
+            video.classList.add("flipped");
+            canvas.classList.add("flipped");
+          } else {
+            video.classList.remove("flipped");
+            canvas.classList.remove("flipped");
+          }
+
+          // Set canvas dimensions
+          canvas.width = video.videoWidth;
+          canvas.height = video.videoHeight;
+          video.play();
+
+          // Start the detection loop
+          detectPose();
+        } catch (error) {
+          console.error("Error accessing webcam:", error);
+          messageElement.textContent =
+            "Error: Cannot access webcam. Please check permissions.";
+          messageElement.classList.replace("text-green-400", "text-red-400");
+        }
+      }
+
+      // Initialize the app
+      async function init() {
+        try {
+          // Load the PoseNet model
+          net = await posenet.load({
+            architecture: "MobileNetV1",
+            outputStride: 16,
+            inputResolution: { width: 640, height: 480 },
+            multiplier: 0.75,
+          });
+          loadingElement.style.display = "none";
+          await startWebcam();
+        } catch (error) {
+          console.error("Error initializing the app:", error);
+          loadingElement.innerHTML = `<p class="text-red-400">Error: Could not access webcam or load AI model. Please check permissions.</p>`;
+        }
+      }
+
+      cameraToggleBtn.addEventListener("click", () => {
+        currentCamera = currentCamera === "user" ? "environment" : "user";
+        cameraToggleBtn.textContent =
+          currentCamera === "user"
+            ? "Switch to Back Camera"
+            : "Switch to Front Camera";
+        startWebcam();
+      });
+
+      window.onload = init;
+    </script>
+  </body>
+</html>
