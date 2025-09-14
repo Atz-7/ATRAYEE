@@ -1,2 +1,2 @@
 # ATRAYEE
-exploring stuff
+HTML base code to integrate with our responsive website
